@@ -1,0 +1,420 @@
+---
+title: "Workshop_4"
+output: html_document
+date: "2026-07-14"
+---
+
+```bash
+# Assembly
+mkdir -p flye
+
+ln -sf /pvol/data/metagenome_assembly/bbd_0.1.fastq.gz .
+```
+
+```bash
+#make shell script with the code and call it run_flye_bbd.sh and save inside flye directory
+
+#!/bin/bash
+#SBATCH --time=720
+#SBATCH --ntasks=12 --mem=10gb
+
+echo "Starting flye bbd in $(pwd) at $(date)"
+
+flye --nano-hq bbd_0.1.fastq.gz --threads 12 --out-dir bbd --meta
+
+echo "Finished flye bbd in $(pwd) at $(date)"
+```
+
+```bash
+# submit flye
+
+sbatch run_flye_bbd.sh
+
+```
+
+```bash
+#check progress
+squeue
+```
+
+```bash
+#binning with metbat
+
+cd ~/marine-genomics
+
+mkdir metabat
+
+cd metabat
+
+```
+
+```bash
+#extract depth information
+cat ../flye/bbd/assembly_info.txt  | grep -v '#' | awk '{OFS="\t";print $1,$3}' > depths_bbd.txt
+
+```
+
+```bash
+#Reorder contigs based on depth
+cat depths_bbd.txt | awk '{print $1}' | xargs samtools faidx ../flye/bbd/assembly.fasta > assembly_bbd_ordered.fasta
+
+```
+
+```bash
+#Run metabat
+
+metabat2 -i assembly_bbd_ordered.fasta -a depths_bbd.txt --cvExt -o bins_bbd/metabat --seed 5
+
+```
+
+```bash
+#Check bin quality with checkm
+
+cd ~/marine-genomics
+
+mkdir checkm
+
+```
+
+```bash
+cd checkm
+
+cat ../flye/bbd/assembly.fasta | bioawk -c fastx '{print length($seq),$name}' | sort -n
+#displays the lengths of all contigs sorted from shortest to longest.
+```
+
+```bash
+#substitute the longest contig name instead of contig_XX in the code below.
+
+mkdir bins_bbd
+cp ../metabat/bins_bbd/*.fa bins_bbd/
+samtools faidx ../flye/bbd/assembly.fasta contig_XX > bins_bbd/contig_XX.fa
+
+```
+
+```bash
+#create a slurm script for your checkm run. save it within your checkm directory as run_checkm_bbd.sh
+
+#shell script code
+
+
+#!/bin/bash
+#SBATCH --time=60
+#SBATCH --ntasks=6 --mem=10gb
+
+echo "Starting checkm in $(pwd) at $(date)"
+
+shopt -s expand_aliases
+alias checkm='apptainer run -B /pvol/:/pvol /pvol/data/sif/checkm.sif checkm'
+
+checkm lineage_wf bins_bbd out -t 4 -x fa -f checkm_results_bbd.txt
+
+echo "Finished checkm in $(pwd) at $(date)"
+```
+
+```bash
+#submit checkm
+sbatch run_checkm_bbd.sh
+```
+
+```bash
+#Select bins based on checkm results
+
+cd checkm
+
+# look at the results from our checkm analysis
+head checkm_results_bbd.txt
+
+#expand results to 20 if needed
+head -n 20 checkm_results_bbd.txt 
+
+```
+
+```bash
+#focus on bins with a completeness greater than 15%. To extract the bin IDs for these we can use awk. This command should print only the lines where the 13th column has a value greater than 15.
+
+cat checkm_results_bbd.txt | awk '$13>15'
+
+#to get just the bin ID not the entire line, {print $1} just to print first column(id)  
+
+cat checkm_results_bbd.txt | awk '$13>15{print $1}'
+
+#send this output to a file so that we can use it in the next step
+cat checkm_results_bbd.txt | awk '$13>15{print $1}' > bbd_topbins.txt
+
+```
+
+```bash
+# Perform taxonomic classification with gtdbtk
+cd ..
+
+```
+
+```bash
+mkdir gtdbtk
+cd gtdbtk
+
+# create a subfolder within the gtdbtk folder called genomes. This is where we will put a copy of each of the top bins we identified in step 1.
+
+mkdir genomes
+```
+
+```bash
+# iterate over our list of topbins. For each of the topbins copy a file corresponding to that bin into our genomes folder 
+
+while read bin;do echo $bin;done < ../checkm/bbd_topbins.txt
+
+```
+
+```bash
+#we have used echo $bin to simply print the name of the bin. We need to turn this bin name into a path specifying the fasta file for the bin. So for every bin we need to prepend the path to its folder ../metabat/bins_bbd/ and then append the file extension .fa
+
+while read bin;do echo "../metabat/bins_bbd/${bin}.fa";done < ../checkm/bbd_topbins.txt
+# rectify error with contig_133.fa by manually adding
+cp ../checkm/bins_bbd/contig_133.fa ../metabat/bins_bbd/
+
+#perform copy
+ while read bin;do cp "../metabat/bins_bbd/${bin}.fa" genomes;done < ../checkm/bbd_topbins.txt
+ 
+```
+
+```bash
+#check if it worked by listing files within the genomes directory
+ls genomes
+
+```
+
+```bash
+#These bins form input for gtdbtk. run the classification workflow, firstlyby creating a shell script in 'gtdbtk' directory. Name your file "run_gtdbtk.sh"
+
+#!/bin/bash
+#SBATCH --time=60
+#SBATCH --ntasks=2 --mem=24gb
+
+echo "Starting gtdbtk in $(pwd) at $(date)"
+
+shopt -s expand_aliases
+alias gtdbtk='apptainer run -B /pvol:/pvol,/pvol/data/mg/gtdbtkdata/release207_v2/:/refdata /pvol/data/sif/gtdbtk.sif'
+
+gtdbtk classify_wf -x fa --cpus 2 --genome_dir genomes --out_dir out --skip_ani_screen
+
+echo "Finished gtdbtk in $(pwd) at $(date)"
+
+```
+
+```bash
+#submit job
+sbatch run_gtdbtk.sh
+
+```
+
+```batch
+
+# Find and annotate genes with prokka
+
+mkdir prokka
+cd prokka
+```
+
+```bash
+#to pick out the first bin ID in your list
+head -n 1 ../checkm/bbd_topbins.txt
+#----results
+contig_133
+----
+```
+
+```bash
+bin=contig_133
+prokka --outdir $bin --prefix $bin  ../metabat/bins_bbd/${bin}.fa
+#---- created folder contig_133
+
+#cross check by listing the folder
+ls metabat.5
+
+#----results
+Contig_133.err  contig_133.faa  contig_133.ffn  contig_133.fna  contig_133.fsa  contig_133.gbk  contig_133.gff  contig_133.log  contig_133.sqn  contig_133.tbl  contig_133.tsv  contig_133.txt
+```
+
+```bash
+#Create a new shell file and save it in  prokka directory. Call it run_prokka.sh and copy the following code into it.
+
+#!/bin/bash
+#SBATCH --time=60
+#SBATCH --ntasks=2 --mem=2gb
+
+echo "Starting prokka in $(pwd) at $(date)"
+
+shopt -s expand_aliases
+alias prokka='apptainer run -B /pvol/:/pvol /pvol/data/sif/prokka.sif prokka'
+
+while read bin;do 
+  prokka --outdir $bin --prefix $bin "../metabat/bins_bbd/${bin}.fa";
+done < ../checkm/bbd_topbins.txt
+
+echo "Finished prokka in $(pwd) at $(date)"
+
+#-----save it in prokka and submit job 
+
+sbatch run_prokka.sh
+
+```
+
+```bash
+## Infer metabolic pathways
+
+#create a directory for minpath results 
+mkdir minpath
+cd minpath
+```
+
+```bash
+#Inputs for minpath will be prepared for each bin based on the prokka .tsv
+head ../prokka/contig_133/contig_133.tsv
+
+##----output- 9 genes
+locus_tag       ftype   length_bp       gene    EC_number       COG     product
+FONJAGKK_00001  CDS     1530                            hypothetical protein
+FONJAGKK_00002  CDS     255                             hypothetical protein
+FONJAGKK_00003  CDS     306                             hypothetical protein
+FONJAGKK_00004  CDS     105                             hypothetical protein
+FONJAGKK_00005  CDS     1515                            hypothetical protein
+FONJAGKK_00006  CDS     4083                            hypothetical protein
+FONJAGKK_00007  CDS     780             2.5.1.41        COG1646 Geranylgeranylglyceryl phosphate synthase
+FONJAGKK_00008  CDS     453                             hypothetical protein
+FONJAGKK_00009  CDS     366                             hypothetical protein
+----
+Many will be missing annotations (called hypothetical protein) but some will have a gene name (eg manA), an EC (Enzyme Commission) number (eg 5.3.1.8), a COG (Clusters of Orthologous Genes) id (eg COG1482) and a protein name (eg Mannose-6-phosphate isomerase ManA).
+```
+
+```bash
+#For input to minpath we only want to keep a unique ID for each gene (column 1) and its EC number (column 5). We can transform the tsv into this format using awk-
+
+head ../prokka/contig_133/contig_133.tsv | awk -F '\t' '{print $1,$5}'
+
+# we are using -F '\t' to tell awk that our input is tab separated. We also want to filter the output to only include lines with an EC number
+
+head ../prokka/contig_133/contig_133.tsv | awk -F '\t' '$5{print $1,$5}'
+
+#Next we need to ensure that the output is tab separated and we also need to remove the header line
+head ../prokka/contig_133/contig_133.tsv | awk -F '\t' '$5{OFS="\t";print $1,$5}' | grep -v '^locus'
+#output--FONJAGKK_00007  2.5.1.41
+
+#change head to cat to include all genes
+ cat ../prokka/contig_133/contig_133.tsv | awk -F '\t' '$5{OFS="\t";print $1,$5}' | grep -v '^locus' > contig_133.ec
+ 
+#Finally send the output to a file so that it can be used as input to minpath
+
+ cat ../prokka/contig_133/contig_133.tsv | awk -F '\t' '$5{OFS="\t";print $1,$5}' | grep -v '^locus' > contig_133.ec
+
+```
+
+```bash
+#run minpath in minpath directory  
+ minpath -ec contig_133.ec -report contig_133.ec.report -details contig_133.ec.details 
+
+# look at the top few lines of output
+head contig_133.ec.report 
+
+# output --> 
+path PWY-7321 any n/a  naive 1  minpath 0  fam0  4  fam-found  1  name  ecdysteroid metabolism (arthropods)
+path PWY-5143 any n/a  naive 1  minpath 1  fam0  1  fam-found  1  name  long-chain fatty acid activation
+path PWY-5340 any n/a  naive 1  minpath 1  fam0  2  fam-found  2  name  sulfate activation for sulfonation
+path PWY-6477 any n/a  naive 1  minpath 0  fam0  3  fam-found  1  name  gibberellin inactivation II (methylation)
+path PWY-6546 any n/a  naive 1  minpath 0  fam0  4  fam-found  1  name  brassinosteroids inactivation
+path PWY-6297 any n/a  naive 1  minpath 1  fam0  1  fam-found  1  name  tuberonate glucoside biosynthesis
+path PWY-801 any n/a  naive 1  minpath 0  fam0  3  fam-found  1  name  homocysteine and cysteine interconversion
+path PWY-5083 any n/a  naive 1  minpath 0  fam0  3  fam-found  1  name  NAD(P)/NADPH interconversion
+path PWY-6972 any n/a  naive 1  minpath 0  fam0  3  fam-found  1  name  oleandomycin activation/inactivation
+path PWY-8138 any n/a  naive 1  minpath 1  fam0  1  fam-found  1  name  polyphosphate metabolism
+
+```
+
+```bash
+# now check on prokka 
+cd ..
+tail ../prokka/slurm-547.out
+# when prokka is finshed run the following code to prepare minpath inputs for all bins
+
+while read bin;do 
+  cat ../prokka/$bin/${bin}.tsv | awk -F '\t' '$5{printf("%s\t%s\n", $1,$5)}' | grep -v '^locus' > ${bin}.ec 
+done < ../checkm/bbd_topbins.txt
+
+##prepares minpath outputs for all bins
+```
+
+```bash
+#run minpath on every bin 
+while read bin;do 
+  minpath -ec ${bin}.ec -report ${bin}.ec.report -details ${bin}.ec.details
+done < ../checkm/bbd_topbins.txt
+
+#output ---> huge amount of information in the outputs from minpath. To keep things tractable we are just going to look at two pathways while in prokka directory
+#pathway PWY-101
+grep 'PWY-101' *.ec.report
+#output---> 
+contig_133.ec.report:path PWY-101 any n/a  naive 1  minpath 0  fam0  4  fam-found  1  name  photosynthesis light reactions
+
+metabat.12.ec.report:path PWY-101 any n/a  naive 1  minpath 1  fam0  4  fam-found  4  name  photosynthesis light reactions
+
+metabat.16.ec.report:path PWY-101 any n/a  naive 1  minpath 1  fam0  4  fam-found  1  name  photosynthesis light reactions
+
+metabat.27.ec.report:path PWY-101 any n/a  naive 1  minpath 1  fam0  4  fam-found  1  name  photosynthesis light reactions
+
+metabat.37.ec.report:path PWY-101 any n/a  naive 1  minpath 0  fam0  4  fam-found  1  name  photosynthesis light reactions
+
+# Question 4.1
+#How many bins contain at least one gene from this pathway? --> 4
+#Which bin has all of the genes (ie a complete pathway)? --> metabat.12
+
+```
+
+```bash
+#Cross referencing results with the output from gtdbtk to see the taxonomy of bins containing this pathway 
+grep 'contig_133' ../gtdbtk/out/gtdbtk.bac120.summary.tsv
+# output-->contig_133      d__Bacteria;p__Bacteroidota;c__Bacteroidia;o__Cytophagales;f__Bernardetiaceae;g__UBA2561;s__UBA2561 sp002340355  GCA_002340355.1 95.0    d__Bacteria;p__Bacteroidota;c__Bacteroidia;o__Cytophagales;f__Bernardetiaceae;g__UBA2561;s__UBA2561 sp002340355  98.71   0.966   GCA_002340355.1 95.0    d__Bacteria;p__Bacteroidota;c__Bacteroidia;o__Cytophagales;f__Bernardetiaceae;g__UBA2561;s__UBA2561 sp002340355  98.71   0.966   d__Bacteria;p__Bacteroidota;c__Bacteroidia;o__Cytophagales;f__Bernardetiaceae;g__;s__    taxonomic classification defined by topology and ANI    topological placement and ANI have congruent species assignments N/A     90.91   11      N/A     N/A
+
+grep 'metabat.12' ../gtdbtk/out/gtdbtk.bac120.summary.tsv
+#output-->metabat.12      d__Bacteria;p__Cyanobacteria;c__Cyanobacteriia;o__Cyanobacteriales;f__Desertifilaceae;g__Roseofilum;s__Roseofilum reptotaenium_A GCA_001890975.1 95.0    d__Bacteria;p__Cyanobacteria;c__Cyanobacteriia;o__Cyanobacteriales;f__Desertifilaceae;g__Roseofilum;s__Roseofilum reptotaenium_A 96.7    0.865   GCA_001890975.1 95.0    d__Bacteria;p__Cyanobacteria;c__Cyanobacteriia;o__Cyanobacteriales;f__Desertifilaceae;g__Roseofilum;s__Roseofilum reptotaenium_A 96.7    0.865   d__Bacteria;p__Cyanobacteria;c__Cyanobacteriia;o__Cyanobacteriales;f__Desertifilaceae;g__Roseofilum;s__  taxonomic classification defined by topology and ANI     topological placement and ANI have congruent species assignments        GCA_002340255.1, s__Roseofilum sp002340255, 95.0, 94.17, 0.87    90.21   11      N/A     N/A
+
+grep 'metabat.16' ../gtdbtk/out/gtdbtk.bac120.summary.tsv
+<!-- #output -->metabat.16      d__Bacteria;p__Firmicutes_A;c__Clostridia;o__Lachnospirales;f__Vallitaleaceae;g__;s__   N/A     N/A     N/A      N/A     N/A     N/A     N/A     N/A     N/A     N/A     d__Bacteria;p__Firmicutes_A;c__Clostridia;o__Lachnospirales;f__Vallitaleaceae;g__;s__    taxonomic novelty determined using RED  classification based on placement in class-level tree    N/A     16.06   11      0.84647 N/A -->
+
+grep 'metabat.27' ../gtdbtk/out/gtdbtk.bac120.summary.tsv
+#output --> d__Bacteria;p__Desulfobacterota_I;c__Desulfovibrionia;o__Desulfovibrionales;f__Desulfovibrionaceae;g__Maridesulfovibrio;s__      N/A     N/A     N/A     N/A     N/A     GCA_002340305.1 95.0    d__Bacteria;p__Desulfobacterota_I;c__Desulfovibrionia;o__Desulfovibrionales;f__Desulfovibrionaceae;g__Maridesulfovibrio;s__Maridesulfovibrio sp002340305 89.99    0.705   d__Bacteria;p__Desulfobacterota_I;c__Desulfovibrionia;o__Desulfovibrionales;f__Desulfovibrionaceae;g__Maridesulfovibrio;s__      taxonomic classification defined by topology and ANI    classification based on placement in class-level tree    GCF_000023445.1, s__Maridesulfovibrio salexigens, 95.0, 84.15, 0.657; GCF_010470665.1, s__Maridesulfovibrio sp010470665, 95.0, 83.67, 0.691; GCF_010470675.1, s__Maridesulfovibrio sp010470675, 95.0, 83.66, 0.671; GCF_004923195.1, s__Maridesulfovibrio sp004923195, 95.0, 83.64, 0.695; GCF_000331025.1, s__Maridesulfovibrio hydrothermalis, 95.0, 79.47, 0.37; GCF_000425265.1, s__Maridesulfovibrio zosterae, 95.0, 79.25, 0.297; GCA_006210265.1, s__Maridesulfovibrio sp006210265, 95.0, 78.49, 0.154; GCF_000429985.1, s__Maridesulfovibrio bastinii, 95.0, 78.04, 0.158; GCF_900177375.1, s__Maridesulfovibrio gilichinskyi, 95.0, 77.99, 0.194; GCF_900101105.1, s__Maridesulfovibrio ferrireducens, 95.0, 77.85, 0.238; GCF_000711735.1, s__Maridesulfovibrio frigidus, 95.0, 77.57, 0.176        30.14   11      0.99573 Genome not assigned to closest species as it falls outside its pre-defined ANI radius
+
+grep 'metabat.37' ../gtdbtk/out/gtdbtk.bac120.summary.tsv
+#output --> metabat.37      d__Bacteria;p__Desulfobacterota;c__Desulfobacteria;o__Desulfobacterales;f__Desulforegulaceae;g__;s__    N/A      N/A     N/A     N/A     N/A     N/A     N/A     N/A     N/A     N/A     d__Bacteria;p__Desulfobacterota;c__Desulfobacteria;o__Desulfobacterales;f__Desulforegulaceae;g__;s__     taxonomic novelty determined using RED  classification based on placement in class-level tree    N/A     16.08   11      0.8249  N/A
+
+#families found --->
+Bernardetiaceae
+Desertifilaceae 
+Vallitaleaceae
+Desulfovibrionaceae
+Desulforegulaceae
+```
+
+```bash
+#pathway PWY_5360 
+grep 'PWY-5360' *.ec.report
+
+#output--> metabat.34.ec.report:path PWY-5360 any n/a  naive 1  minpath 0  fam0  3  fam-found  1  name  superpathway of tetrathionate reduction (Salmonella typhimurium)
+
+# This pathway is associated with sulphate reducing bacteria, This pathway is important because it includes enzymes required to reduce sulfite to hydrogen sulfide. But, its not Salmonella typhimurium- it is just an example of the pathway, the real genus and species is found by cross referencing the result using gtdbtk summary
+
+grep 'metabat.34' ../gtdbtk/out/gtdbtk.bac120.summary.tsv
+
+#output--> metabat.34      d__Bacteria;p__Campylobacterota;c__Campylobacteria;o__Campylobacterales;f__Arcobacteraceae;g__Halarcobacter;s__  N/A     N/A     N/A     N/A     N/A     N/A     N/A     N/A     N/A     N/A     d__Bacteria;p__Campylobacterota;c__Campylobacteria;o__Campylobacterales;f__Arcobacteraceae;g__Halarcobacter;s__  ANI     classification based on placement in class-level tree    GCA_004116455.1, s__Halarcobacter sp004116455, 95.0, 81.38, 0.381; GCA_004118855.1, s__Halarcobacter sp004118855, 95.0, 80.71, 0.384; GCF_003346815.1, s__Halarcobacter bivalviorum, 95.0, 80.71, 0.406; GCA_001895145.1, s__Halarcobacter sp001895145, 95.0, 80.51, 0.403; GCF_005771535.1, s__Halarcobacter arenosus, 95.0, 80.5, 0.431; GCA_002869565.1, s__Halarcobacter sp002869565, 95.0, 80.37, 0.393; GCA_013373175.1, s__Halarcobacter sp013373175, 95.0, 80.3, 0.412; GCA_003252105.1, s__Halarcobacter sp003252105, 95.0, 79.87, 0.381; GCF_004116625.1, s__Halarcobacter mediterraneus, 95.0, 79.72, 0.374; GCF_013201825.1, s__Halarcobacter ebronensis, 95.0, 78.98, 0.343; GCF_006459125.1, s__Halarcobacter anaerophilus, 95.0, 78.79, 0.33   30.14   11      0.93462 N/A
+
+#Question 4.2
+
+#How many bins contain the pathway PWY-5360? --> 1 (metabat.34)
+
+#What family (in a taxonomic sense) do these bins belong to?
+
+#family --> 
+Arcobacteraceae
+#genus-->
+Halarcobacter
+
+```
